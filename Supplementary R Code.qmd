@@ -1,0 +1,1412 @@
+---
+title: 'AssessmentScript'
+format: html
+editor: visual
+---
+
+# Bioloigical Process Stage Prediction from Gene Expression Values
+
+QMD file for accompanying report.
+
+## Exploratory Data Analysis
+
+The cell below loads all the libraries needed for the scripts in this document. If any are missing, the install comments can be uncommented. This is included here at the start rather than when their use is required so any issues with libraries can be fixed before executing any further cells. Note that the cell below also sets the seed used for reproducability.
+
+```{r}
+set.seed(19) 
+
+#install.packages('readr')
+suppressPackageStartupMessages(library(readr))
+
+#install.packages('tidyverse')
+suppressPackageStartupMessages(library(tidyverse))
+
+#install.packages('ggplot2')
+suppressPackageStartupMessages(library(ggplot2))
+
+#install.packages('cowplot')
+suppressPackageStartupMessages(library(cowplot))
+
+#install.packages('dplyr')
+suppressPackageStartupMessages(library(dplyr))
+
+#install.packages('reshape2')
+suppressPackageStartupMessages(library(reshape2))
+
+#install.packages('caret')
+suppressPackageStartupMessages(library(caret))
+
+#install.packages('e1071')
+suppressPackageStartupMessages(library(e1071))
+
+#install.packages('MASS')
+suppressPackageStartupMessages(library(MASS))
+
+#install.packages('factoextra')
+suppressPackageStartupMessages(library(factoextra))
+
+#install.packages('hopkins')
+suppressPackageStartupMessages(library(hopkins))
+
+#install.packages('corrplot')
+suppressPackageStartupMessages(library(corrplot))
+
+#install.packages('mclust')
+suppressPackageStartupMessages(library(mclust))
+
+#install.packages('gridExtra')
+suppressPackageStartupMessages(library(gridExtra))
+
+#install.packages('patchwork')
+suppressPackageStartupMessages(library(patchwork))
+
+#install.packages('ggpubr')
+suppressPackageStartupMessages(library(ggpubr))
+```
+
+### Data Loading and Cleaning
+
+First data is imported and then data cleaning is performed before moving onto data visualisation.
+
+```{r}
+data_raw <- read_csv('data/data.csv', show_col_types=FALSE)
+```
+
+Dataset is given a quick look over before beginning cleaning to gain an idea of data types and dataset size.
+
+```{r}
+head(data_raw)
+str(data_raw)
+```
+
+Any duplicate rows are removed, note none were found. Following this null values are removed using a 1% (equates to 30 max values) tolerance for automatic removal. Were there to be more null values, this should have been looked into further before removing.
+
+```{r}
+# Calculate percentage of duplicate and null rows/values
+dup_percent <- round(sum(duplicated(data_raw)) / nrow(data_raw) * 100, 2)
+null_percent <- round(sum(is.na(data_raw)) / nrow(data_raw) * 100, 2)
+
+# Handle duplicates
+cat('Percentage of rows that are duplicated:', dup_percent, '\n')
+if (dup_percent > 0) {
+  cat(paste0(dup_percent, 'any found duplicates have been removed\n'))
+  data_raw <- distinct(data_raw)
+}
+
+# Handle null values
+cat('\nPercentage of null values in data set:', null_percent, '\n')
+if (null_percent < 1) {
+  cat('this is deemed low enough to be removed automatically\n')
+  data_raw <- na.omit(data_raw)
+}
+```
+
+Now the data is deemed sufficiently clean, a copy is made for dataset exploration and visualisation.
+
+```{r}
+# Create copy for EDA
+eda_data <- data.frame(data_raw)
+```
+
+### Data Visualisation and Exploration
+
+Before any analysis of class distributions, class balance is checked and the label column is changed to a factor to aid in visualisation by class.
+
+```{r}
+# Ensure label column is a factor, not a character
+eda_data$label <- as.factor(eda_data$label)
+
+# Check to see if data is balanced across our labels
+round(prop.table(table(eda_data$label)), 3)
+```
+
+#### Histograms for Feature Distribution
+
+Since 20 features and 4 target labels is not particularly large, a visual exploration of each feature is possible. Thus to begin with, histograms for each feature with label colouring is plotted to see distributions. This is first done as one combined plot:
+
+```{r}
+# Pivot dataset for easy plotting
+long_eda_data <- pivot_longer(data = eda_data, 
+                          cols = where(is.numeric), 
+                          names_to = 'Feature', 
+                          values_to = 'Value')
+##  Reference [1]  ##
+```
+
+```{r}
+# Plot histograms, color by label
+ggplot(long_eda_data,
+       aes(x = Value,
+           fill = label)) +
+  geom_histogram(position = 'identity',
+                 alpha = 0.6, # makes label plots slightly transluscent
+                 bins = 40) +
+  facet_wrap(~ Feature, # used to create grid plot
+             scales = 'free',
+             ncol = 5) +
+  labs(title = 'Feature Histograms',
+       x = 'Feature Value',
+       y = 'Frequency',
+       fill = 'Label') +
+  theme_minimal()
+
+##  Reference [2]  ##
+```
+
+Then also as individual plots as visibility is slightly limited on grid plot. Note that here labels are stacked instead of being translucent.
+
+```{r}
+# Loop through each feature in the dataframe, ignoring the label column
+for (col in names(eda_data[,-21])) {
+  
+    # Create the histogram
+    plt <- ggplot(eda_data,
+                  aes_string(x = col,
+                             fill = 'label')) + 
+          geom_histogram(bins = 40,
+                         color = 'black') +
+          labs(title = paste0('Histogram of: ', col),
+               x = 'Feature Value',
+               y = 'Frequency',
+               fill = 'Label') +
+          theme_minimal()
+    
+    # Display the plot
+    print(plt)
+}
+```
+
+Immediately it can be seen that most features are normally distributed except for the skew on X8, bimodal peaks on X7, X9. To a lesser extent, there also seem to be different peaks on X3 depending on label. These features should be noted as they may be more useful for our models when it comes to predicting labels. In other words, more clearly separable clusters may exist within them.
+
+Because of the strong normal distributions, I would advise to not perform any transformations on the data for now. A logarithmic transformation on X8 could be argued for because of the skew, however the skew actually comes purely from values belonging to the C and D label - thus this features is actually more useful to with the skew present!
+
+#### Correlation
+
+Next, correlation between features is examined. This is again done on both the dataset as a whole and then also by label. This is important as some correlations may be much more pronounced when examined for individual labels.
+
+```{r}
+# Functiion for creating correlation heatmaps by class
+corrbylabel <- function(label_names, dataset)
+{
+  # Filter on givel label and then remove label column
+  dataset <- dataset[dataset$label %in% label_names, ][,-21]
+  
+  # Get correlation heatmap and remove redundat information.
+  corr_matx_label <- round(cor(dataset, use = 'pairwise.complete.obs'), 2)
+  corr_matx_label[upper.tri(corr_matx_label)]<- NA
+  
+  # Create correlation plot
+  corr_plt <- ggplot(data=melt(corr_matx_label,
+                               na.rm=TRUE),
+                     aes(x=Var1,
+                         y=Var2,
+                         fill=value)) +
+              geom_tile(color='white') +
+              scale_fill_gradient2(low='blue', 
+                                   high='red',
+                                   midpoint = 0,
+                                   limit = c(-1, 1),
+                                   name = 'Corr Value') +
+              labs(x = "Feature 1", y = "Feature 2") +
+              theme_minimal() +
+              theme(axis.text.x = element_text(angle=90,
+                                               vjust=0.5,
+                                               hjust = 1)) 
+
+  return(corr_plt)
+} 
+```
+
+```{r}
+# Correlation plots for individual labels
+corr_A_plt <- corrbylabel('A', eda_data)
+corr_B_plt <- corrbylabel('B', eda_data)
+corr_C_plt <- corrbylabel('C', eda_data)
+corr_D_plt <- corrbylabel('D', eda_data)
+
+# Correlation plot for whole dataset
+corr_all_plt <- corrbylabel(c('A','B','C','D'), eda_data) +
+                ggtitle('Correlation Plot for Whole Dataset')
+```
+
+Observe correlations between features across the whole dataset.
+
+```{r}
+corr_all_plt
+```
+
+And then also for each individual label.
+
+```{r}
+plot_grid(corr_A_plt, corr_B_plt, corr_C_plt, corr_D_plt, labels = 'AUTO')
+##  Reference [3]  ##
+```
+
+Notice there are two 'pockets' of correlated features. Across labels X17, X18, X19 and X20 there is an alternating correlation between each other. Then similarly, this is the case for X7, X8, X9 and X10 - apart from for label D. The pattern shows negative correlation with directly neighboring features and then alternating again with each further neighbour - perhaps this is best described as a checkerboard pattern.
+
+Features outside of the ones mentioned seem to have no correlation within A, B, C and this is contrasted by D where there is a greater spread of correlation amongst most features.
+
+This pattern should be explored further and this is continued by plotting correlated features.
+
+#### Contour Plots on Correlated Features
+
+Contour plots for interesting correlations are next constructed, with particular interest to the two 'pockets'. A function is built for plotting through these pockets. Density plots were chosen instead of scatterplots as at \~3000 records scattering can be difficult to interpret - especially when a distribution has a tight grouping.
+
+```{r}
+# Collate the featues from the two pockets
+pocket1 <- c( 'X7',  'X8',  'X9', 'X10')
+pocket2 <- c('X17', 'X18', 'X19', 'X20')
+
+# Function for density plots across a set of features
+contour_features <- function(features){
+  plots <- list()
+  counter <- 1
+  # Loop through the features in pairs, ensuring to avoid duplicate iterations
+  for (count1 in 1:(length(features) - 1)) {
+    for (count2 in (count1 + 1):length(features)) {
+      
+      # Calculate correlation
+      corr_value <- cor(eda_data[[features[count1]]],
+                        eda_data[[features[count2]]],
+                        method = "pearson")
+
+      # Create plot
+      p <- ggplot(eda_data,
+                  aes_string(x = features[count1],
+                             y = features[count2],
+                             color = 'label')) +
+        stat_density_2d(geom = "density_2d") +
+        ggtitle(paste(features[count1], "vs", features[count2]), 
+                subtitle = paste0("Corr = ", round(corr_value, 2))) +
+        theme_minimal() +
+        theme(plot.title = element_text(size=10),
+              plot.subtitle = element_text(size=8))
+    
+    plots[[counter]] <- p
+    counter <- counter + 1
+    }
+  }
+  return(plots)
+}
+
+```
+
+```{r}
+#  Get plots for the two feature pockets
+pocket1_plots <- contour_features(pocket1)
+pocket2_plots <- contour_features(pocket2)
+```
+
+```{r}
+# Show and arrange plots for pocket 1
+annotate_figure(ggarrange(pocket1_plots[[1]], pocket1_plots[[2]],
+                          pocket1_plots[[3]], pocket1_plots[[4]],
+                          pocket1_plots[[5]], pocket1_plots[[6]],
+                          ncol=3, # Controlls col/row numbers for arrangement
+                          nrow=2,
+                          common.legend = TRUE), # adds legend for all plots
+                top = text_grob("Contour Plots for X7-X10"))
+
+```
+
+Recall that this pocket contained the one skewed feature and the two features with bimodal peaks and this perhaps manifests here in clearly separable labels. Moreover, while the plots do have a correlation, the real significant relationships can be observed on a label by label basis.
+
+It should also be noted that as on the correlation heatmap, D had no or weak correlation on these features, here this label is the only one not clearly separable - apart from for its greater variance than the others. Further, it was less dense than the other classes, producing much fewer contour rings. This can also be seen on the correlation score being less significant on some values when D is included. Perhaps classifying for D will be more tricky.
+
+This will be highly useful for feature and model selection. In the context of the research question, it can also be seen here how the gene expressions do change through the biological process. From a relatively clear place throughout stages A, B and C to then finally arrive at what appears to be an unpredictable value for D. The other features may be needed to gain predictability on the behavior of genes at D.
+
+Contrasting the first pocket, the second pocket has a more cohesive correlation but subsequently also has less separable features. A linear relationship may be present between these features, but it can seldom be argued that labels can be visually separated here.
+
+```{r}
+# Show and arrange plots for pocket 2
+annotate_figure(ggarrange(pocket2_plots[[1]], pocket2_plots[[2]],
+                          pocket2_plots[[3]], pocket2_plots[[4]],
+                          pocket2_plots[[5]], pocket2_plots[[6]],
+                          ncol=3, # Controlls col/row numbers for arrangement
+                          nrow=2,
+                          common.legend = TRUE), # adds legend for all plots
+                top = text_grob("Contour Plots for X17-X20"))
+```
+
+#### Feature Independence Tests
+
+Further on linear relationships, correlation does not pickup on non-linear dependencies and most of our features seem to have no or weak correlations.
+
+A Naive Bayes model works off of the assumption that features are independent, thus a weak performing model can be a good indicator of strong feature dependencies. Though we should note it is not a formal test as even with a few dependent relationships a Naive Bayes model can perform satisfactory. Regardless, having some idea of weather relationships between our features exist will be useful for model construction.
+
+```{r}
+set.seed(19)
+# Split dataset for a validation and for training. 
+trainIndex <- sample(1:nrow(eda_data), 0.7 * nrow(eda_data))
+train_data <- eda_data[trainIndex, ]
+test_data <- eda_data[-trainIndex, ]
+
+# 10-fold cross validation is used for model training
+train_control <- trainControl(method = "cv", number = 10)
+
+##  Reference [4]  ## 
+
+# Create model
+nb_model <- naiveBayes(label ~ ., data = train_data, trControl = train_control)
+
+# Get predictions and evaluate on validation set
+nb_predictions <- predict(nb_model, test_data)
+confusionMatrix(nb_predictions, test_data$label)
+```
+
+Here a high accuracy, sensitivity and specificity show high performance across all labels - apart from a noticeably lower sensitivity on D, indicating issues with miss-classifying the other labels as D. This is particularity interesting in the context of the previous plots indicating greater variability on D and will have to be explored further in the model building and evaluation section of the project. For now however, feature independence on the main can be assumed.
+
+### Outlier Detection and Removal
+
+#### Outliers by Feature
+
+Outlier removal is approached cautiously due to fear of information loss. For the seemingly normally distributed features z-scores will be used. For features with bimodal peaks (X7, X9) and skew (X8) this will not be quite as straightforward.
+
+The threshold for outlier detection is set at 3.29 as this is equivalent to 1 in 1000 observations for normally distributed data. This is a relatively lenient threshold which was chosen to catch extreme outliers without too much information loss. If this however does find an unusually large number of outliers then an alternative method will have to be considered.
+
+```{r}
+# Get Z-scores from standardising the data, note exclusion of discussed features
+z_scores <- scale(eda_data[, -c(7,8,9,21)])
+
+# Find outliers
+gaussian_outliers <- which(abs(z_scores) > 3.29, arr.ind = TRUE)
+
+##  Reference [5]  ##
+```
+
+Outliers were then investigated further to see if any features were causing significantly more or less outliers to show. The visual also serves to inform on exactly how many outliers were found.
+
+```{r}
+# Tabulate how many times each feature appears as an outlier
+outlier_counts <- data.frame(table(colnames(z_scores)[gaussian_outliers[, 2]]))
+
+# Bar plot to see which features cause the most outliers
+ggplot(outlier_counts, aes(x = reorder(Var1, Freq), y = Freq)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Outlier Count by Feature (Z-score > 3.29)",
+    subtitle = paste0("Total Number of Outliers: ", sum(outlier_counts['Freq'])),
+    x = "Feature",
+    y = "Number of Outliers"
+  ) +
+  theme_minimal()
+
+##   ##
+```
+
+From the figure it appears that the maximum number of outliers by feature (8) is much higher than the minimum (1) but these are still small in the context of the 2980 rows from the whole data-set. Further 61 total outliers spread across the features as such should not lead to significant information loss and these are subsequently removed.
+
+```{r}
+# Remove outliers found
+eda_data <- eda_data[-unique(gaussian_outliers[, 1]),]
+```
+
+### Outliers by Label
+
+Next, outliers still need to be seen to on X7, X8 and X9. Since the two peaks on X7 and X9 are caused by the labels across that feature having different peaks, traditional techniques for bimodial outliers should not be used as these will pick up on values inbetween the peaks. Instead z values will be calculated and then scored on a label by label basis. This should still be effective as if we recall our histograms, the labels within these features were still roughly normally distributed.
+
+```{r}
+# Get Z-scores from standardising the data, note this time we want the features previously excluded
+z_scores <- eda_data[,c(7,8,9)]
+z_scores$label <- eda_data$label
+
+# This is a dummy cobdition used to the placeholder where outliers by label will be stored in the for loop
+label_outliers <-  which(abs(z_scores[c(1,2,3)]) == NA, arr.ind = TRUE)
+
+# Use for loop to get outliers by label
+for (label_name in unique(eda_data$label)){
+  
+  # Scale values 
+  label_z_scores <- scale(z_scores[z_scores$label == label_name,c(1,2,3)])
+  
+  # Select outliers and add outliers by label
+  label_outliers <- rbind(label_outliers,
+                          which(abs(label_z_scores) > 3.29,
+                                arr.ind = TRUE))
+  }
+
+```
+
+```{r}
+# Tabulate how many times each feature appears as an outlier
+outlier_counts <- data.frame(table(colnames(z_scores)[label_outliers[, 2]]))
+
+# Bar plot to see which features cause the most outliers
+ggplot(outlier_counts,
+       aes(x = reorder(Var1, Freq),
+           y = Freq)) +
+  geom_bar(stat = "identity",
+           fill = "steelblue") +
+  labs(title = "Outlier Count by Feature (Z-score > 3.29)",
+    subtitle = paste0("Total Number of Outliers: ", sum(outlier_counts['Freq'])),
+    x = "Feature",
+    y = "Number of Outliers"
+    ) +
+  theme_minimal()
+
+##   ##
+```
+
+Once all outliers have been removed to a degree deemed sufficient, a clean copy of the data is made.
+
+```{r}
+dataset <- eda_data[-unique(label_outliers[, 1]),]
+```
+
+### Final Data Checks
+
+#### Class Balance
+
+Before moving on to model construction, class balance is checked as it may be affected by outlier removal
+
+```{r}
+# Check to see if data is balanced across our labels
+round(prop.table(table(dataset$label)), 3)
+```
+
+Notice the difference in balance - this implies D labeled rows were more prevalent as outliers whereas C labeled ones were less. This follows the narrative that the variance within D is greater than the other labels.
+
+To regain label balance, the less represented classes are upsampled.
+
+```{r}
+# Current class distribution
+table(dataset$label)
+
+# Get sampling target amount
+max_count <- max(table(dataset$label))
+
+# Split dataset by label and then up-sample each grouping.
+label_split <- group_split(group_by(dataset, label))
+
+# Combine upsampled labels back into a dataset
+dataset <- bind_rows(lapply(label_split, function(sub_df) {
+  sub_df[sample(1:nrow(sub_df), size = max_count, replace = TRUE), ]
+}))
+
+##  Reference [6]  ##
+##    ##
+
+
+# Check new distribution
+table(dataset$label)
+prop.table(table(dataset$label))
+```
+
+Data is also standardised as that aids logistic regression and most non-tree based models' performance.
+
+```{r}
+# Create a copy of the dataset that is not standardised
+non_standardised_data <- data.frame(dataset)
+
+# Standardise the dataset by scaling and centering values
+dataset <- predict(preProcess(dataset[, -21],
+                              method = c("center", "scale")),
+                   dataset)
+```
+
+With the dataset re-balanced, model construction can begin and EDA is complete having gained a strong foundation of ideas around feature distributions, relations and behaviors.
+
+## Logistic Regression
+
+Instead of a simple Test/Train split 10 fold cross validation will be used as it is reduces both overfitting and the effect of chance on the model. An 80 - 20 split will however be used to get the data for cross validation and an "unseen" validation set. This split was chosen as it leaves adequete data for validation as well as for each fold during cross validation. It should be noted that caret's trainControl function performs cross validation with an automatically balanced folds.
+
+The same split will be used for all supervised learning models in order to evaluate on the same validation set and thus enable a more valid model comparison.
+
+```{r}
+# Get training and testing split
+training_samples <- dataset$label%>%
+  createDataPartition(p = 0.8, list = FALSE) 
+
+# Split data into a training and testing set.
+train_data  <- dataset[training_samples, ] # training (for k fold cv)
+test_data <- dataset[-training_samples, ] # testing (validation set after cv)
+
+##  Reference [8]  ##
+```
+
+### Initial Modelling
+
+#### Model Definition and Training
+
+As this is the first model, all features will be used. Once this is evaluated, feature importance from the model can be used in conjunction with findings from EDA for feature selection.
+
+```{r}
+# Train logistic regression model
+model_logistic <- train(label ~., 
+                     data = train_data, 
+                     method = "multinom", 
+                     trControl = train_control, # 10-fold CV was defined during EDA
+                     trace = FALSE) # Hides long display of model training
+```
+
+#### Model Evaluation and Analysis
+
+Predictions are obtained from the validation set and then these are compared to the actual label values to form a confusion matrix. the model performed with high accuracy, but on further investigation of specificity and sensitivity (recall) it can be seen that the model performs extremely well on all labels and is only let down on missclassifying A, B, C as D. The D label has a sensitivity of 0.6, this being the only sensitivity/specificity metric that is not around 0.9. Finally, it should also be mentioned that in a few cases D was missclassified as A giving A a sensitivity around 0.8 .
+
+As hinted at during the EDA, it seems D is slightly more difficult to separate from the other labels. Apart from this though, the model does perform well with performance on B and C being near perfect if D is ignored. Next the model's coefficients will be examined to gain an idea how the features are used to predict, which is crucial to the research question.
+
+```{r}
+# Get predictions from validation set
+predictions_logistic <- predict(model_logistic, newdata = test_data, type = "raw")
+
+# Initial model performance characteristics
+cat("Logistic accuracy: ", mean(predictions_logistic == test_data$label), "\n")
+cat("\n", "Logistic Regression", "\n")
+confusionMatrix(predictions_logistic, test_data$label)
+```
+
+It should also be noted that plotting the confusion matrix as a heatmap was considered but ultimately left out as the misclassification is relatively low so would not be visually engaging or informative, sensitivity and specificity will be more useful for model comparison.
+
+Delving deeper into model coefficients to understand how features are used to predict labels, first coefficients are extracted and then visualized on a label basis.
+
+```{r}
+# Convert to a data frame
+logistic_coeffs <- as.data.frame(as.table(coef(model_logistic$finalModel)))
+
+colnames(logistic_coeffs) <- c("Label", "Feature", "Coefficient")
+
+## reference  [7] ##
+```
+
+It can be seen that the features from identified as the first pocket (X7, X8, X9 and X10 ) from the EDA all had significant coefficients. But this visualisation is slightly unyielding for feature selection. For this absolute coefficient values are instead summed and plotted separately. Note also that label A is absent here as the model builds coefficients as seperations from the base class which here is A.
+
+```{r}
+ggplot(logistic_coeffs, 
+       aes(y = Feature,
+           x = Coefficient,
+           fill = Label)) +
+  geom_bar(stat = "identity",
+           position = "dodge") +
+  labs(title = "Model Coefficients",
+       x = "Coefficient Value",
+       y = "Feature Coefficient") +
+  theme_minimal()
+```
+
+```{r}
+# Get feature importance based off of summed absoloute coefficient values
+feature_importance <- summarise(
+  group_by(logistic_coeffs,Feature),
+  Importance = sum(abs(Coefficient))
+)
+
+# Arrange by descending importance
+feature_importance <- feature_importance[order(-feature_importance$Importance), ]
+
+##  Reference [7] ##
+```
+
+It can now be observed how dominant X8 is in label prediction and also exactly how prominent all of the pocket features are. This will now be used to do some feature selection.
+
+```{r}
+ggplot(feature_importance, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_minimal() +
+  labs(title = "Feature Importance for Logistic Regressor",
+       x = "Feature",
+       y = "Sum of Absolute Coefficient") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Some manual feature selection is then attempted using the above figure. The top 5 features are used to build a new logistic model, but this time with all pairwise interactions added. This should only be done with a small feature set as it will blow the feature space of the model up. Similar analysis as before is then conducted with the use of the validation set and confusion matrix.
+
+```{r}
+model_selected <- train(
+  label ~ (.)^2,  # all features and pairwise interactions
+  data = dataset[c('X18','X10','X9','X7','X8','label')],
+  method = "multinom",
+  trControl = train_control,
+  trace = FALSE) # Hides long display of model training
+```
+
+Interestingly while overall accuracy went down, sensitivity and specifivity stayed roughly the same across A, B and C. The drop in accuracy is explained by the further drop in sensitivty in D. This decrease from the initial model shows that the features with significant coefficents from before serve most to classify on A, B and C. Due to D's high spread compared to the other classes, accurate classification within this label may depend on the dataset as a whole more, without any single feature specifically - whereas the other labels can be split easily using the non-gaussian features identified in the EDA. Further feature selection will be performed using Lasso and Ridge regularisation.
+
+```{r}
+# Get predictions from validation set
+predictions_selected <- predict(model_selected, newdata = test_data, type = "raw")
+
+# Initial model performance characteristics
+cat("Logistic accuracy: ", mean(predictions_selected == test_data$label), "\n")
+cat("\n", "Logistic Regression", "\n")
+confusionMatrix(predictions_selected, test_data$label)
+```
+
+### Regularisation
+
+Both Lasso (L1) and Ridge (L2) regularisation are worth examining as they can offer differing insights into feature selection. To push logistic regression's model performance to the maximum an elastic net should also be built. The optimal alpha value from this can then be used to examine which mixture of L1 and L2 benefits the model the best.
+
+Elastic net usually does best when the feature space has correlations and is large in comparison to the dataset size - which isn't necessarily the case here. However it is still worth seeing how this model performs, especially in the case that Lasso or Ridge does better.
+
+#### Regularisation Definition and Training
+
+```{r}
+set.seed(19)
+# L1 model definiton
+model_lasso <- train(label ~.,
+                     data = test_data,
+                     method = "glmnet", 
+                     trControl = train_control,
+                     family = "multinomial",
+                     tuneGrid = expand.grid(alpha = 1, 
+                        lambda = seq(0.0, 0.05,  length = 200))) # Select best lambda between 0 and 1, increment in 0.05
+# L2 model definiton
+model_ridge <- train(label ~.,
+                     data = test_data,
+                     method = "glmnet", 
+                     trControl = train_control,
+                     family = "multinomial",
+                     tuneGrid = expand.grid(alpha = 0, 
+                        lambda = seq(0.0, 0.05,  length = 200))) # Select best lambda between 0 and 1, increment in 0.05
+# Elastic net definition
+model_net <- train(label ~.,
+                     data = test_data,
+                     method = "glmnet",
+                     trControl = train_control,
+                     family = "multinomial",
+                     tuneLength = 10)  # Selects best lambda and alpha trying 10 values for each, so 100 in total
+
+##  Reference [8] ##
+```
+
+#### Regularisation Evaluation and Analysis
+
+As before first predictions are obtained which can then be used to produce confusion matrices.
+
+```{r}
+predictions_lasso <- predict(model_lasso, newdata = test_data, type = "raw")
+predictions_ridge <- predict(model_ridge, newdata = test_data, type = "raw")
+predictions_net <- predict(model_net, newdata = test_data, type = "raw")
+```
+
+```{r}
+cat("Lasso accuracy:      ", mean(predictions_lasso == test_data$label), "\n")
+cat("Ridge accuracy:      ", mean(predictions_ridge == test_data$label), "\n")
+cat("Elastic Net accuracy:", mean(predictions_net == test_data$label), "\n\n")
+
+cat("\nOptimal Lasso parameters:", 
+    " \n(alpha:", model_lasso$bestTune[[1]], ")",
+    " \nlambda:", model_lasso$bestTune[[2]],  
+    "\n")
+cat("\nOptimal Ridge parameters:", 
+    " \n(alpha:", model_ridge$bestTune[[1]], ")",
+    " \nlambda:", model_ridge$bestTune[[2]],  
+    "\n")
+cat("\nOptimal Elastic net parameters:", 
+    " \nalpha:", model_net$bestTune[[1]],
+    " \nlambda:", model_net$bestTune[[2]],  
+    "\n")
+
+
+
+
+cat("\n", "Lasso", "\n")
+confusionMatrix(predictions_lasso, test_data$label)
+
+cat("\n", "Ridge", "\n")
+confusionMatrix(predictions_ridge, test_data$label)
+
+cat("\n", "Elastic Net", "\n")
+confusionMatrix(predictions_net, test_data$label)
+```
+
+#### Coefficient Analysis
+
+Focusing on the best performing and possibly most informative regularisation method, coefficients are explored below for the optimal lasso model. Here it is worth paying extra attention to which coefficients were shrunk to zero. This way feature selection can be performed automatically and further insights can be gained into which gene's expression levels have little or no linear relation to predicting the biological state. Having also understood that classification is highly accurate and understandable for A, B and C, special interest should be paid to how coefficients are shrunk for D.
+
+It is also worth noting that the elastic net converged to a lasso model.
+
+```{r}
+# Get list of coefficient matrices for each label
+coefs_list <- coef(model_lasso$finalModel, s = model_lasso$bestTune$lambda)
+
+# Will be used to store coefficients in long format for plotting
+coef_long <- data.frame()
+
+# Loop through each label value and extract coefficients
+for (class in names(coefs_list)) {
+  coef_mat <- as.matrix(coefs_list[[class]])
+  temp_ <- data.frame(
+    Feature = rownames(coef_mat),
+    Coefficient = coef_mat[, 1],
+    Class = class
+  )
+  coef_long <- rbind(coef_long, temp_)
+}
+##  Reference [7] ##
+
+# Remove intercept
+coef_long <- subset(coef_long, Feature != "(Intercept)")
+```
+
+Observe which coefficients were shrunk to zero and dominance of a few features. also note greater coefficent balance on D - suggests features here have a more shared importance.
+
+```{r}
+# Round to 3 d.p. and then flag any d.p. closer to 0 than 0.01
+# This is done to aid visual below
+coef_long$Coefficient <- round(coef_long$Coefficient, 2)
+coef_long$ZeroFlag <- coef_long$Coefficient == 0
+
+ggplot(coef_long, aes(x = Class, y = Feature, fill = Coefficient)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    guide = "colorbar") +
+  geom_tile(data = subset(coef_long,
+                          ZeroFlag),
+            fill = "black") +
+  geom_text(aes(label = Coefficient), # Add coefficient values
+            size = 3) +  
+  theme_minimal() +
+  labs(title = "Lasso Coefficient Heatmap",
+       x = "Label",
+       y = "Feature",
+       fill = "Coefficient")
+
+##  Reference [7] ##
+```
+
+Coefficient paths are also plotted to better understand how lasso regression reduced features. It stands out here again just how dominant X7 is on classifying B and the other pocket features show up again in A and C. Interestingly on D, even though it is not the largest coefficient at first, X11 is shrunk last. Revisiting the histogram for this feature it can be seen that D has a slightly different peak to the other labels here - perhaps this can be a feature to highlight in helping to classify on D. The significance of X9 on D may come D having a unique skew in X9.
+
+```{r}
+# Plot coefficient paths
+plot(model_lasso$finalModel,
+     xvar = "lambda",
+     label = TRUE,
+     main = "Lasso Model")
+
+##  Reference [8] ##
+```
+
+```{r}
+# Quick histogram of X11 - observe slightly different peak on D
+ggplot(dataset, aes_string(x = 'X11',
+                           fill = 'label')) + 
+          geom_histogram(bins = 40,
+                         color = 'black') +
+          labs(title = 'Histogram of X11',
+               x = col,
+               y = 'Frequency') +
+            theme_minimal()
+```
+
+## Data Simulation using Bootstrapping
+
+Using bootstrapping (random sampling with replacement), simulated data was used to create new logistic regression models. The coefficients' for these models were extracted and used to create a dataframe on which clustering can be later performed to observe patterns in feature coefficients. Although it was previously seen that lasso regularisation on the logistic model improved model performance, this was only by a small amount.
+
+The computational cost of standardising each bootstrap sample and then training a lasso model was not seen as a worthwhile trade-off in performance, thus simple multinomial regression was used.
+
+For each model, quick metrics were also calculated to gain spread on model performance.
+
+The code below demonstrates how bootstrapping was initially performed, it is intensive computationally and takes a while. Therefore the produced dataset was saved as an external csv file. As it stands the cells below will import this csv file for use later in the script. If desired however, the original simulation can be done instead by changing the value of the *perform_simulation* variable below. Simulated data should be identical regardless due to seed being set.
+
+```{r}
+# Change to TRUE to perform simulation again
+perform_simulation = FALSE
+```
+
+```{r}
+if (perform_simulation){
+  # Create storage variable for bootrstap values
+  coefs_B <- list()
+  coefs_C <- list()
+  coefs_D <- list()
+  bootstrapped_accuracy <- rep(NA,40)
+  
+  # Loop for bootstrapping
+  for (i in 1:length(bootstrapped_accuracy)){
+    
+    # Get sample through random sleection with replacement
+    bootstrap_sample <- sample_n(dataset, nrow(train_data), replace=TRUE) 
+    
+    # Get rows not sampled, will be used for model testing
+    not_selected <- suppressMessages(anti_join(dataset, bootstrap_sample))
+    
+    # Train model - no cv to speed up generation and thus allow for more samples
+    lm <- train(label ~., 
+                data = bootstrap_sample, 
+                method = "multinom", 
+                trace = FALSE) # Hides long display of model training
+    
+    # Store model coefficients and metrics
+    coefs_B[[i]] <- coef(lm$finalModel)[1, ] # B
+    coefs_C[[i]] <- coef(lm$finalModel)[2, ] # C
+    coefs_D[[i]] <- coef(lm$finalModel)[3, ] # D
+    
+    bootstrapped_accuracy[[i]] <- mean(predict(lm,
+                                               newdata = not_selected,
+                                               type = "raw") == not_selected$label)
+  # Reformat lists into data frames
+  simulated_coefs_B <- as.data.frame(bind_rows(coefs_B))
+  simulated_coefs_C <- as.data.frame(bind_rows(coefs_C))
+  simulated_coefs_D <- as.data.frame(bind_rows(coefs_D))
+  
+  # Add labels
+  simulated_coefs_B$label <- 'B'
+  simulated_coefs_C$label <- 'C'
+  simulated_coefs_D$label <- 'D'
+  
+  # Combine all label coefficients into one dataframe
+  simulated_coefs <- rbind(simulated_coefs_B,
+                           simulated_coefs_C,
+                           simulated_coefs_D)
+  
+  #  Ensure label is as factor, will be important in clutering review
+  simulated_coefs$label <- as.factor(simulated_coefs$label)
+  
+  # Save simulated data as external csv files
+  write.csv(simulated_coefs, "data/simulated_data.csv", row.names = FALSE)
+  write.csv(bootstrapped_accuracy, "data/simulated_accuracy.csv", row.names = FALSE)
+  }
+} else {
+    simulated_coefs <- read.csv("data/simulated_data.csv")
+    bootstrapped_accuracy <- read.csv("data/simulated_accuracy.csv")
+}
+##  Reference [9] ##
+```
+
+Compiled accuracy values are analysed. Here it is observed that accuracy remains consistent, with very small variance.
+
+```{r}
+# Display statistics about bootstrapped accuracy values
+print(summary(bootstrapped_accuracy))
+print(paste0('Spread on accuracy: ', sqrt(var(bootstrapped_accuracy))))
+```
+
+## Further Supervised Learning
+
+Having explored linear relationships with logistic regression, it was decided to continue investigation with a non-linear model. For this purpose a random forest was used, which is less interpretable but feature importance can still be extracted. Further, it is a highly powerful model and may be able to solve missclassification issues on D.
+
+### Random Forest
+
+#### Model Definition and Training
+
+The model is trained using the same k-fold cross validation used on the logistic regression models and further, the same validation set will be used. This is to ensure fair model comparison.
+
+```{r}
+set.seed(19)
+# Train the model
+model_rf <- train(
+  label ~ .,          
+  data = train_data,          
+  method = "rf",        # Random forest
+  trControl = train_control,
+  tuneLength = 5        # Number of different mtry values to try
+)
+
+##  Reference [10] ##
+
+# View results
+plot(model_rf)
+```
+
+#### Model Performance Testing
+
+Seemingly the random forest model has completely resolved issues with missclassifying labels as D. This could be an indicator of some non-linear relationship that logistic regression did not pick up on, or perhaps overfitting.
+
+```{r}
+# Get predictions from validation set
+predictions_rf <- predict(model_rf, newdata = test_data, type = "raw")
+
+# Initial model performance characteristics
+confusionMatrix(predictions_rf, test_data$label)
+```
+
+#### Model Interpretation
+
+As mentioned before, random forests are not known for their interpretability. But using mean gini decrease across decision trees, feature importance can be quantified even if a direct equation cannot be produced. The plot below illustrates exactly this and we should note the prevalence of features already identified as important from logistic regression.
+
+```{r}
+ggplot(varImp(model_rf)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = round(Importance, 2)), hjust = -0.1, size = 3) +
+  theme_minimal() +
+  labs(title = "Random Forest Feature Importance", x = "Fetures", y = "Importance (Gini Decrease)")
+
+##  Reference [10]  ##
+```
+
+Further from this graph, it was decided to analyse features in 3 separate blocks by order of their importance.
+
+With block 1 holding features with importance of at least 15 (X3 and upwards), block 2 on importance less than 15 but greater than 1.5 (X2 to X6) and block 3 on importance lower than 1.5 (X16 downwards).
+
+```{r}
+plot_features <- function(selected_features){
+  
+  # Extract the mean and standard deviation by label for the feature indexes     supplied to the function
+  selected_means <- summarise_all(group_by(dataset,label),
+                                  "mean")[c(selected_features + 1, 1)]
+  
+  selected_sd <- summarise_all(group_by(dataset, label),
+                               "sd")[c(selected_features + 1, 1)]
+  
+  # Reformat aggregate data values using pivot
+  selected_means <- pivot_longer(
+                          data = selected_means,
+                          cols = paste0('X', selected_features),
+                          names_to = "Feature",
+                          values_to = "Means"
+                        )
+  selected_sd <- pivot_longer(
+                          data = selected_sd,
+                          cols = paste0('X', selected_features),
+                          names_to = "Feature",
+                          values_to = "sd"
+                        )
+  
+  # Combine tables by adding standard deviation column to means table
+  features_plot <- cbind(selected_means, selected_sd['sd'])
+  
+  
+  # Using the aggregate data plot changing feature means as labels progress 
+  features_by_labels <- ggplot(data=features_plot, aes(
+            x = label, 
+            y = Means, 
+            group = Feature, 
+            colour = Feature)
+            ) +
+        geom_line() +
+        geom_point() +
+        geom_ribbon(aes( # SDs used to create ribbon to show spread
+            ymin = Means - 0.1*sd, # NOTE!: SD is scaled to 10% to keep vis clean
+            ymax = Means + 0.1*sd, 
+            fill = Feature),
+          alpha = 0.2, color = NA) +
+        labs(title = "Selected RFC Feature Means across Labels") +
+        scale_y_continuous(limits = c(-1.1, 1.3)) + 
+        theme_minimal()
+  
+  # Using the aggregate data plot changing label means through features
+  labels_by_features <- ggplot(data=features_plot, aes(
+            x = Feature, 
+            y = Means, 
+            group = label, 
+            colour = label)) +
+        geom_line() +
+        geom_point() +
+        geom_ribbon(aes( # # SDs used to create ribbon to show spread
+            ymin = Means - 0.1*sd, # NOTE!: SD is scaled to 10% to keep vis clean
+            ymax = Means + 0.1*sd,
+            fill = label),
+          alpha = 0.2, color = NA) +
+        labs(title = "Label Means across RFC Selected Features") +
+        scale_y_continuous(limits = c(-1.1, 1.3)) + 
+        theme_minimal()
+  
+  return(features_by_labels/labels_by_features)
+}
+
+##  Reference [1]  ##
+##  Reference [7]  ##
+##  Reference [11] ##
+```
+
+```{r}
+# features identified as most important
+features_high <- c(7:11, 3)
+
+# features of middling importance
+features_mid <- c(12:15, 1, 2, 4, 5)
+
+# features identified as unimportant
+features_low <- c(16:20)
+```
+
+```{r}
+plot_features(features_high)
+plot_features(features_mid)
+plot_features(features_low)
+```
+
+It can be seen again that the D label does not seem to be quite as clearly seperable on a single feature as the other labels are. Morover, we can see a general pattern for features where as the labels progress, they increase from A to a peak at B then decrease to a trough at C and then back to a simmilar level as A at D. This also explains why B and C seem so seperable, whereas A tends to have some missclassification with D.
+
+#### One vs All on D
+
+Having seen random forests exceptional performance with multinomial classification on the dataset, it is highly likely that it will perform equally well on a binary classification task between D and not D. This way variable importance can be extracted specifically for classifying on D and then compared to variable importance from previous model.
+
+```{r}
+# prepare data sets for binary classification on D
+train_data_D <- data.frame(train_data)
+train_data_D$label <- as.factor(ifelse(train_data_D$label == 'D', 'D', 'Not D'))
+
+test_data_D <- data.frame(test_data)
+test_data_D$label <- as.factor(ifelse(test_data_D$label == 'D', 'D', 'Not D'))
+```
+
+```{r}
+model_rf_D <- train(
+  label ~ .,          
+  data = train_data_D,          
+  method = "rf",        # Random forest
+  trControl = train_control,
+  tuneLength = 5        # Number of different mtry values to try
+)
+
+# View results
+print(model_rf_D)
+plot(model_rf_D)
+
+```
+
+```{r}
+# Get predictions from validation set
+predictions_rf_D <- predict(model_rf_D, newdata = test_data_D, type = "raw")
+
+# Initial model performance characteristics
+confusionMatrix(predictions_rf_D, test_data_D$label)
+```
+
+```{r}
+ggplot(varImp(model_rf_D)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = round(Importance, 2)), hjust = -0.1, size = 3) +
+  theme_minimal() +
+  labs(title = "D vs Non-D RFC Feature Importance", x = "Features", y = "Importance (Gini Decrease)")
+
+```
+
+Having gained initial variable importance plot, next data is reworked so to plot comparison of the two models.
+
+```{r}
+# Get feature importances for D vs non D model
+var_imp_dvsall <- varImp(model_rf_D)$importance
+var_imp_dvsall$Classification <- 'D vs All'
+var_imp_dvsall$Feature <- rownames(var_imp_dvsall)
+
+# Get feature importances for clasification on all labels
+var_imp_allclass <- varImp(model_rf)$importance
+var_imp_allclass$Classification <- 'All Classes'
+var_imp_allclass$Feature <- rownames(var_imp_allclass)
+
+# Combine feature importance datasets
+importance_comparison <- rbind(var_imp_dvsall, var_imp_allclass)
+importance_comparison$Feature <- as.factor(importance_comparison$Feature)
+
+# Group by Feature, summarise the mean importance, and arrange
+feature_order <- aggregate(Overall ~ Feature,
+                           data = importance_comparison,
+                           FUN = sum)
+# Order features by summed importance
+feature_order <- feature_order[order(feature_order$Overall), ]
+
+# Reorder the Feature factor
+importance_comparison$Feature <- factor(importance_comparison$Feature,
+                                        levels = feature_order$Feature)
+
+# Plot comparison of two RFC models' feature importance
+ggplot(importance_comparison, aes(x = Feature,
+                                  y = Overall,
+                                  fill = Classification)) +
+  geom_bar(stat = "identity",
+           position = "identity",
+           alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Overlayed Feature Importances by Model",
+       x = "Feature",
+       y = "Importance") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+## Reference [7] ##
+```
+
+### Linear Discriminant Analysis
+
+Logistic regression provided a clearly interpretable model with direct feature coefficients. Further, random forest classyfied all labels to a high standard and provided valuable insight into feature eimportance as well as how features change by label. Therefore for the second supervised learning model LDA was chosen to build visualisations.
+
+```{r}
+# Perform LDA
+model_lda <- lda(label ~ ., data = train_data)
+
+# Get LDA projection (scores)
+lda_values <- predict(model_lda)
+
+# Create a dataframe for plotting
+lda_df <- data.frame(lda_values$x)
+lda_df$label <- train_data$label
+
+# Plot first 2 LDA components
+ggplot(lda_df, aes(x = LD1, y = LD2, color = label)) +
+  stat_density_2d(geom = "density_2d") +
+  labs(title = "Projection onto First 2 Linear Discriminants") +
+  theme_minimal()
+
+##  Reference [12] ##
+```
+
+```{r}
+# Get metrics for LDA
+lda_predictions <- predict(model_lda, test_data)
+confusionMatrix(lda_predictions$class, test_data$label)
+```
+
+LDA here has shown that A, B and C appear easily separable. This cannot be said for D and can serve as an indicator, alongside the earlier Naive Bayes model, that classification with D may be more tricky than the other labels. Accuracy here is 0.84 which is sufficient to take confidence in LDA's results.
+
+## Unsupervised Learning
+
+### Clustering on Original Dataset
+
+#### Data Re-Processing for Unsupervised Learning
+
+Data set is re-worked to gain seperate labeled, unlabeled dataets as well as labels.
+
+```{r}
+# Copy labeled dataset and the seperately gain labels and unlabeled dataset.
+data_labeled <- data.frame(dataset)
+data_labels <- dataset$label
+data_unlabeled <- dataset[, -21]
+
+##  Reference [13] ##
+```
+
+Hopkins' statistic is used to score the dataset's suitability for clustering. A score close to 1 indicates the existence fo clusters. If this score is low on the dataset as a whole, then repeated tests can be performed on varying permutations of selected features.
+
+```{r}
+# Calculate and display hopkin's statistic on unlabeled dataset.
+hopkins_stat <- hopkins(data_unlabeled)
+print(hopkins_stat)
+
+##  Reference [13] ##
+```
+
+This indicates a very strong clustering structure and so clustering is attempted on the whole dataset.
+
+#### Gaussian Mixture Model
+
+K-Means assumes spherical shapes for clustering and from various plots it has been seen that the dataset when spherical is visually not suitable for clustering or when clusters do exist, the data is not spherical. Features in the dataset do however have on the whole have a normal distribution, this in combination with the previous problems lend themselves well to using GMM.
+
+Because the number of labels is already known, clustering will be completed for 2 - 5 clusters. This way behaviors can be observed for how data clusters for labels as well as how labels are squeezed for fewer clusters and then stretched for more.
+
+For each model, clusters will be plotted and then using a confusion matrix, a heatmap will be used to show the proportion of labels in each cluster.
+
+```{r}
+gmm_cluster <- function(num_clust){
+  # Create and perform clustering
+  gmm_model <- Mclust(data_unlabeled, G = num_clust)
+  
+  # Get confusion matrix for performance analysis
+  gmm_conf_matrix <- table(Actual = dataset$label,
+                       Predicted = gmm_model$classification)
+  
+  # Data transformation to get clustering results as a percentage of classes
+  cluster_label_percentage <- round(prop.table(gmm_conf_matrix,
+                                               margin = 1) * 100,
+                                    2)
+  cluster_results_data <- as.data.frame(as.table(cluster_label_percentage))
+  
+  # Displays clustering on unlabeled dataset
+  k <- fviz_cluster(gmm_model, data = data_unlabeled, geom = "point")
+  print(k)
+  
+    # Plot the heatmap using ggplot2 and add the percentage values
+  p <- ggplot(cluster_results_data, aes(x = Actual, y = Predicted, fill = Freq)) +
+    geom_tile() +
+    scale_fill_gradient(low = "white", high = "blue") +
+    geom_text(aes(label = sprintf("%.2f", Freq)), color = "black", size = 3) +  # Add labels
+    labs(x = "Label", 
+         y = "Cluster", 
+         fill = "Percentage") +
+    theme_minimal()
+
+  return(p)
+}
+
+##  Reference [7]  ##
+##  Reference [13] ##
+##  Reference [14] ##
+```
+
+```{r}
+clust_2 <- gmm_cluster(2)
+clust_3 <- gmm_cluster(3)
+clust_4 <- gmm_cluster(4)
+clust_5 <- gmm_cluster(5)
+```
+
+```{r}
+annotate_figure(ggarrange(clust_2, clust_3, clust_4, clust_5,
+                          ncol=2, # Controlls col/row numbers for arrangement
+                          nrow=2,
+                          common.legend = TRUE), # adds legend for all plots
+                top = text_grob('GMM Clustering with Varying Cluster Numbers'))
+```
+
+Clustering results here are very interesting. For clusters G = 2 onwards label C almost has its own cluster onto itself - showing how this label is the most separable. Following on from this at G = 3 B gets its own cluster and then simmirlalry for A at G = 4. Observing D, at G = 3 the mdoel clusters A and B together and gives D its own cluster. This is important because at G = 4 D is clustered solely. The remaining in each case is in majority with whichever cluster A is in. Thus the model would suggest that records where D is not clealry seperable are in cases where these values are confused with A.
+
+This was partially already known from supervised learning, but its corroboration from unsupervised techniques is welcome.
+
+#### Principal Component Analysis
+
+Finally, PCA is done to further understanding of feature behaviors and to attempt creating 2-D visualisations of the data.
+
+##### PCA on All Features
+
+```{r}
+pca_result <- prcomp(dataset[, -21], center = TRUE, scale. = TRUE)
+pca_summary <- summary(pca_result)
+pca_summary$importance[, 1:4] # Show summary statistics on first 4 PC
+
+## Reference [7]  ##
+## Reference [15] ##
+```
+
+```{r}
+plot(pca_result, type = "l")  # Scree plot
+
+## Reference [15] ##
+```
+
+As expected, the highly correlated features get mapped into the same principal component. This brings back the two pockets initially observed during the correlation plots in the EDA. The rest of the dimensions (3 upwards) are mapped to in sparse and unuseful ways. Whats more, the first two principal components do not capture more than 50% of the variance and so visualising on them would be misleading.
+
+Therefore having performed and examined PCA on the whole dataset, PCA will be redone with selected features.
+
+```{r}
+var <- get_pca_var(pca_result)
+corrplot(var$cos2, is.corr=FALSE)
+
+## Reference [15] ##
+```
+
+Due to low variance capture on the first two PCs, PCA for 2d visualisation here is not representative. Visualisation was still made for interest, but should not be utilised and as such is excluded from the report.
+
+```{r}
+# Create new dataset using first two PCs
+pca_scores <- as.data.frame(pca_result$x[, 1:2])  
+pca_scores$label <- data_labels 
+```
+
+```{r}
+# Density plot of first two PCs
+ggplot(pca_scores, aes(x = PC1, y = PC2, color = label)) +
+  stat_density_2d(geom = "density_2d") +
+  labs(title = "Density Contours of PC1 and PC2") +
+  theme_minimal()
+```
+
+##### PCA on Selected Features
+
+PCA was attempted again on selected features. The features used were the ones deemed most important by the random forest model from supervised learning. The code below is an almost exact copy of the code used for initial PCA. Here breakdown of feature contribution is also plotted as variance capture for first two PCs exceeded 50%.
+
+```{r}
+pca_result_2 <- prcomp(dataset[, features_high], scale = TRUE, center = TRUE)
+summary(pca_result_2)
+```
+
+```{r}
+plot(pca_result_2, type = "l")  # Scree plot
+```
+
+Here the first two PC capture the majority of the variance with a cumulative proportion of 64.29 so I proceed to use this.
+
+```{r}
+var <- get_pca_var(pca_result_2)
+corrplot(var$cos2, is.corr=FALSE)
+```
+
+```{r}
+# Plot to show how features contribute to PC1 and PC2
+a<-fviz_contrib(pca_result_2, choice = "var", axes = 1)
+b<-fviz_contrib(pca_result_2, choice = "var", axes = 2)
+grid.arrange(a,b, ncol=2, top='Contribution of features to the First Two PCs')
+
+## Reference [15] ##
+```
+
+```{r}
+# Create new dataset using first two PCs
+pca_scores <- as.data.frame(pca_result_2$x[, c(1,2)])  # 
+pca_scores$label <- data_labels 
+```
+
+```{r}
+ggplot(pca_scores, aes(x = PC1, y = PC2, color = label)) +
+  stat_density_2d(geom = "density_2d") +
+  theme_minimal() +
+  labs(title = "Density Contours of PCA by Label")
+```
+
+### Clustering on Simulated Coefficients
+
+First Hopkin's statistic is calculated again on all the simulated dataset to confirm clusterability. Again, a high result here gives confidence in proceeding.
+
+```{r}
+# Calculate and display hopkin's statistic on unlabeled dataset.
+hopkins(simulated_coefs[,-22])
+
+## Reference [13] ##
+```
+
+Clustering is first performed on the combined dataset of model coefficients. Here perfect clustering indicates that model predictions for labels are deliberate and predictable. This further confirms that relationships between the gene expressions and biological states do exist.
+
+The code below is just a simple adaptation of the code used for clustering on the recorded data from above.
+
+```{r}
+sim_gmm_model <- Mclust(simulated_coefs[,-22], G = 3)
+  
+sim_gmm_conf_matrix <- table(Actual = simulated_coefs$label,
+                     Predicted = sim_gmm_model$classification)
+sim_label_percentage <- round(prop.table(sim_gmm_conf_matrix, margin = 1) * 100, 2)
+sim_cluster_results_data <- as.data.frame(as.table(sim_label_percentage))
+  
+k <- fviz_cluster(sim_gmm_model,
+                  data = simulated_coefs[,-22],
+                  geom = "point")
+print(k)
+  
+    # Plot the heatmap using ggplot2 and add the percentage values
+p <- ggplot(sim_cluster_results_data,
+            aes(x = Actual,
+                y = Predicted,
+                fill = Freq)) +
+    geom_tile() +
+    scale_fill_gradient(low = "white", high = "blue") +
+    geom_text(aes(label = sprintf("%.2f", Freq)), color = "black", size = 5) +  # Add labels
+    labs(title = "Heatmap of Clusters by True Labels (Percentage Breakdown)", 
+         x = "Label", 
+         y = "Cluster", 
+         fill = "Percentage") +
+    theme_minimal()
+print(p)
+
+## Reference [14] ##
+## Reference [7]  ##
+```
+
+## Conclusion
+
+Having performed extensive modelling and analysis, it can be said that the dataset has been understood and underlying patterns have been fleshed out. Models have been created to high performance which can be used for both interpretation and classification of new data. Thus I am confident that the reaserch question has been answered to a good degree of satisfaction. For in depth discussion see accompanying report.
+
+## References
+
+\[1\] - Bobbitt, Z. (2022) *How to Use pivot_longer() in R*. Statology. Available at: <https://www.statology.org/pivot_longer-in-r/> (Accessed: 5 May 2025).
+
+\[2\] - Bobbitt, Z. (2021) 'How to Use facet_wrap() in R', Statology. Available at: <https://www.statology.org/facet_wrap/> (Accessed: 6 May 2025).
+
+\[3\] - Wilke, C.O. (2024) 'Introduction to cowplot', *cowplot*, 22 January. Available at: <https://wilkelab.org/cowplot/articles/introduction.html> (Accessed: 3 May 2025).
+
+\[4\] - Bobbitt, Z. (2020) 'K-Fold Cross Validation in R (Step-by-Step)', *Statology*. Available at: <https://www.statology.org/k-fold-cross-validation-in-r/> (Accessed: 11 May 2025).
+
+\[5\] - Soetewey, A. (2020) 'Outliers Detection in R', *Stats and R*. Available at: <https://statsandr.com/blog/outliers-detection-in-r/> (Accessed: 19 April).
+
+\[6\] - R-bloggers (2019) 'Methods for dealing with imbalanced data', *R-bloggers*. Available at: <https://www.r-bloggers.com/2019/04/methods-for-dealing-with-imbalanced-data/> (Accessed: 19 April 2025).
+
+\[7\] - OpenAI (2025) *ChatGPT*, Version GPT-4. Available at: <https://openai.com/chatgpt> (Accessed: 11 May 2025).
+
+\[8\] - Anquandah, J. (2025) 'Logistic_Regression.qmd', Available at: <https://blackboard.uwe.ac.uk/ultra/courses/_365666_1/cl/outline> (Accessed: 22 April 2025).
+
+\[9\] - GeeksforGeeks (2025) 'How to do nested cross-validation with LASSO in caret or tidymodels?', *GeeksforGeeks*. Available at: <https://www.geeksforgeeks.org/how-to-do-nested-cross-validation-with-lasso-in-caret-or-tidymodels/> (Accessed: 1 May 2025).
+
+\[10\] - Anquandah, J. (2025) 'Simulation.qmd', Available at: <https://blackboard.uwe.ac.uk/ultra/courses/_365666_1/cl/outline> (Accessed: 7 May 2025).
+
+\[11\] - GeeksforGeeks (2024) 'Building a Random Forest with Caret', *GeeksforGeeks*. Available at: <https://www.geeksforgeeks.org/building-a-randomforest-with-caret/> (Accessed: 28 Apr 2025).
+
+\[12\] - Wickham, H. (2025) 'geom_ribbon: Ribbons and area plots in ggplot2', *ggplot2*, Available at: https://ggplot2.tidyverse.org/reference/geom_ribbon.html (Accessed: 28 Apr 2025).
+
+\[13\] - Bobbitt, Z. (2020) 'Linear Discriminant Analysis in R (Step-by-Step)', *Statology*. Available at: <https://www.statology.org/linear-discriminant-analysis-in-r/> (Accessed: 5 May 2025).
+
+\[14\] - Anquandah, J. (2025) 'Hierarchical Clustering.qmd', Available at: <https://blackboard.uwe.ac.uk/ultra/courses/_365666_1/cl/outline> (Accessed: 9 May 2025).
+
+\[15\] - GeeksforGeeks (2025) 'What is Gaussian Mixture Model Clustering Using R?', *GeeksforGeeks*. Available at: https://www.geeksforgeeks.org/what-is-gaussian-mixture-model-clustering-using-r/ (Accessed: 9 May 2025).
+
+\[16\] - Anquandah, J. (2025) 'PCA.qmd', Available at: <https://blackboard.uwe.ac.uk/ultra/courses/_365666_1/cl/outline> (Accessed: 8 May 2025).
