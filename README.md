@@ -5,16 +5,17 @@ This project explores how gene expression data can be used to predict stages wit
 
 ### Methods
 - After data cleaning and exploratory analysis, logistic regression was used as a baseline high interpretability model.
-- Random Forest models were used to produce a high performance classifier.
-- LDA and PCA were performed to produce two dimensional visualisations of the dataset classes.
+- Regularisation techniques were performed to reduce overfitting and where Lasso was successful, for feature selection.
+- Random Forest models were used to produce a high-performance classifier.
+- LDA and PCA were performed to produce two-dimensional visualisations of the dataset classes.
 - Bootstrapping was used produce simulated datasets, with logistic regression performed on each simulation to produce a dataset of coefficients.
-- GMM was performed on teh simulated coefficients dataset to assess model stability.
+- GMM was performed on the simulated coefficients dataset to assess model stability.
 
 ### Key Results
-A high performance model was produced, where sensitivity and recal reached above 90% on all classes.
+A high-performance model was produced, where sensitivity and recall reached above 90% on all classes.
 
 ### Key Insights
-Key genes for identifying bioligcal state were identified, with figures detailing the exact way in which they change and interact.
+Key genes for identifying biological state were identified, with figures detailing the exact way in which they change and interact.
 It was also understood why one of the states was more challenging to classify on.
 
 ### Tools & Technologies
@@ -27,4 +28,4 @@ Project Details
 Duration: 2 months
 Dataset: 20 gene expression features
 
-Grade: [84% (Distinction)]
+Grade: [84% (Distinction)].
